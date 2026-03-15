@@ -313,6 +313,7 @@ const CONFIG = {
   SEATS_LIST: "CourseRoundSeats",
   FLOW_URL:   "https://default964b8fc4bc9d4799b80270ae47b0f0.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/e705cd6257c349079db04da6998ccb2e/triggers/manual/paths/invoke?api-version=1",
   SP_SCOPE:   "https://orascomconstructionegypt.sharepoint.com/.default",
+  FLOW_SCOPE: "https://service.flow.microsoft.com//.default",
 };
 
 // ── MSAL setup ────────────────────────────────────────────────────────────────
@@ -377,7 +378,13 @@ function onSignedIn() {
 
 async function signIn() {
   try {
-    await msalInstance.loginRedirect({ scopes: [CONFIG.SP_SCOPE, "User.Read"] });
+    await msalInstance.loginRedirect({
+      scopes: [
+        CONFIG.SP_SCOPE,
+        CONFIG.FLOW_SCOPE,
+        "User.Read"
+      ]
+    });
   } catch(e) { console.error("Login error:", e); }
 }
 
@@ -393,11 +400,25 @@ async function getToken() {
     });
     return resp.accessToken;
   } catch(e) {
-    const resp = await msalInstance.acquireTokenRedirect({
+    await msalInstance.acquireTokenRedirect({
       scopes:  [CONFIG.SP_SCOPE],
       account: currentAccount,
     });
-    return resp?.accessToken;
+  }
+}
+
+async function getFlowToken() {
+  try {
+    const resp = await msalInstance.acquireTokenSilent({
+      scopes:  [CONFIG.FLOW_SCOPE],
+      account: currentAccount,
+    });
+    return resp.accessToken;
+  } catch(e) {
+    await msalInstance.acquireTokenRedirect({
+      scopes:  [CONFIG.FLOW_SCOPE],
+      account: currentAccount,
+    });
   }
 }
 
@@ -831,14 +852,14 @@ async function submit(){
     );
 
     // Step 4 — Trigger Power Automate flow (emails + Teams meeting)
-    // Token passed in Authorization header for same-tenant auth
+    // Uses separate Flow token scope for Power Automate authentication
     try{
-      const token = await getToken();
+      const flowToken = await getFlowToken();
       await fetch(CONFIG.FLOW_URL,{
         method:"POST",
         headers:{
           "Content-Type":"application/json",
-          "Authorization":`Bearer ${token}`
+          "Authorization":`Bearer ${flowToken}`
         },
         body:JSON.stringify(payload)
       });
