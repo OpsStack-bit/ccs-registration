@@ -427,14 +427,27 @@ async function getSiteId() {
   return spSiteId;
 }
 
-async function getListItems(listName, select = "", filter = "") {
+async function getListItems(listName) {
   const siteId = await getSiteId();
-  let url = `/sites/${siteId}/lists/${listName}/items?expand=fields`;
-  if (select)  url += `&$select=${select}`;
-  if (filter)  url += `&$filter=${filter}`;
-  url += "&$top=100&$orderby=fields/RoundDate asc";
+  const url = `/sites/${siteId}/lists/${listName}/items?expand=fields&$top=100`;
   const data = await graphGet(url);
-  return data.value.map(i => ({ ID: i.id, ...i.fields }));
+  // Map Graph fields to expected format
+  return data.value.map(i => {
+    const f = i.fields;
+    return {
+      ID:               i.id,
+      CourseName:       f.CourseName       || f.Title || "",
+      RoundNumber:      f.RoundNumber      || "",
+      RoundDate:        f.RoundDate        || "",
+      RoundTime:        f.RoundTime        || "",
+      TotalSeats:       f.TotalSeats       || 12,
+      SeatsRegistered:  f.SeatsRegistered  || 0,
+      IsOpen:           f.IsOpen           !== false,
+      CourseRoundLabel: f.CourseRoundLabel || f.Title || "",
+      SuperUserName:    f.SuperUserName    || "",
+      SuperUserEmail:   f.SuperUserEmail   || "",
+    };
+  }).sort((a,b) => (a.RoundDate > b.RoundDate ? 1 : -1));
 }
 
 async function updateListItem(listName, itemId, fields) {
@@ -829,21 +842,35 @@ async function submit(){
 
     await updateListItem(CONFIG.SEATS_LIST, sel.ID, updateFields);
 
-    // Step 4 — Trigger Power Automate flow
+    // Step 4 — Write registration to SharePoint CourseRegistrations list
+    // Power Automate Flow C triggers automatically on item creation
     try{
-      const flowToken = await getToken();
-      if(flowToken){
-        await fetch(CONFIG.FLOW_URL,{
-          method:"POST",
-          headers:{
-            "Content-Type":"application/json",
-            "Authorization":`Bearer ${flowToken}`
-          },
-          body:JSON.stringify(payload)
-        });
-      }
+      const siteId2 = await getSiteId();
+      const token2  = await getToken();
+      await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId2}/lists/CourseRegistrations/items`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token2}`,
+          "Content-Type":  "application/json"
+        },
+        body: JSON.stringify({
+          fields: {
+            Title:        payload.fullName,
+            Email:        payload.email,
+            EmployeeID:   payload.employeeId,
+            Department:   payload.department,
+            RoundID:      payload.roundId,
+            RoundLabel:   payload.roundLabel,
+            CourseName:   payload.courseName,
+            RoundDate:    payload.roundDate,
+            RoundTime:    payload.roundTime,
+            SubmittedAt:  payload.submittedAt,
+          }
+        })
+      });
     }catch(flowErr){
-      console.warn("Flow trigger warning:",flowErr);
+      // Non-blocking — seat is reserved even if registration log fails
+      console.warn("Registration log warning:", flowErr);
     }
 
     // Step 5 — Update local state and show confirmation
