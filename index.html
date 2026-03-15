@@ -303,15 +303,152 @@ body{display:flex;flex-direction:column;background:var(--navy)}
 </head>
 <body>
 
+<script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.10.0/lib/msal-browser.min.js"></script>
 <script>
+// ── Configuration ─────────────────────────────────────────────────────────────
 const CONFIG = {
-  SITE_URL: "https://orascomconstructionegypt.sharepoint.com/sites/CourseRegistrationSystem",
+  CLIENT_ID:  "4a1b7c53-7a66-4323-b681-7217c10c0259",
+  TENANT_ID:  "964b8fc4-bc9d-4799-b802-70ae47b0f00f",
+  SITE_URL:   "https://orascomconstructionegypt.sharepoint.com/sites/CourseRegistrationSystem",
   SEATS_LIST: "CourseRoundSeats",
-  FLOW_URL: "https://default964b8fc4bc9d4799b80270ae47b0f0.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/e705cd6257c349079db04da6998ccb2e/triggers/manual/paths/invoke?api-version=1",
-  ADMIN_EMAIL: "mahmoud.hanafi@orascom.com",
+  FLOW_URL:   "https://default964b8fc4bc9d4799b80270ae47b0f0.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/e705cd6257c349079db04da6998ccb2e/triggers/manual/paths/invoke?api-version=1",
+  SP_SCOPE:   "https://orascomconstructionegypt.sharepoint.com/AllSites.Write",
 };
+
+// ── MSAL setup ────────────────────────────────────────────────────────────────
+const msalConfig = {
+  auth: {
+    clientId:   CONFIG.CLIENT_ID,
+    authority:  `https://login.microsoftonline.com/${CONFIG.TENANT_ID}`,
+    redirectUri: window.location.origin + window.location.pathname,
+  },
+  cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false },
+};
+
+const msalInstance = new msal.PublicClientApplication(msalConfig);
+let currentAccount = null;
+
+async function initAuth() {
+  await msalInstance.initialize();
+
+  // Handle redirect response
+  try {
+    const resp = await msalInstance.handleRedirectPromise();
+    if (resp) currentAccount = resp.account;
+  } catch(e) { console.error("Redirect error:", e); }
+
+  // Check if already signed in
+  const accounts = msalInstance.getAllAccounts();
+  if (accounts.length > 0) {
+    currentAccount = accounts[0];
+    onSignedIn();
+  } else {
+    showLoginScreen();
+  }
+}
+
+function showLoginScreen() {
+  document.getElementById("auth-screen").style.display = "flex";
+  document.getElementById("app-screen").style.display  = "none";
+}
+
+function onSignedIn() {
+  document.getElementById("auth-screen").style.display = "none";
+  document.getElementById("app-screen").style.display  = "flex";
+
+  // Pre-fill user details from Entra account
+  if (currentAccount) {
+    const name  = currentAccount.name  || "";
+    const email = currentAccount.username || "";
+    const nameEl  = document.getElementById("f-name");
+    const emailEl = document.getElementById("f-email");
+    if (nameEl  && !nameEl.value)  nameEl.value  = name;
+    if (emailEl && !emailEl.value) emailEl.value = email;
+  }
+
+  // Update user display in left panel
+  if (currentAccount) {
+    document.getElementById("user-name").textContent  = currentAccount.name || "";
+    document.getElementById("user-email").textContent = currentAccount.username || "";
+  }
+
+  goTo(1);
+}
+
+async function signIn() {
+  try {
+    await msalInstance.loginRedirect({ scopes: [CONFIG.SP_SCOPE, "User.Read"] });
+  } catch(e) { console.error("Login error:", e); }
+}
+
+async function signOut() {
+  await msalInstance.logoutRedirect({ account: currentAccount });
+}
+
+async function getToken() {
+  try {
+    const resp = await msalInstance.acquireTokenSilent({
+      scopes:  [CONFIG.SP_SCOPE],
+      account: currentAccount,
+    });
+    return resp.accessToken;
+  } catch(e) {
+    const resp = await msalInstance.acquireTokenRedirect({
+      scopes:  [CONFIG.SP_SCOPE],
+      account: currentAccount,
+    });
+    return resp?.accessToken;
+  }
+}
+
+// ── Authenticated SharePoint fetch ────────────────────────────────────────────
+async function spGet(url) {
+  const token = await getToken();
+  const res = await fetch(url, {
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Accept": "application/json;odata=verbose",
+    }
+  });
+  if (!res.ok) throw new Error("SP GET failed: " + res.status);
+  return res.json();
+}
+
+async function spPost(url, body, method = "POST", extra = {}) {
+  const token = await getToken();
+  const res = await fetch(url, {
+    method,
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Accept":        "application/json;odata=verbose",
+      "Content-Type":  "application/json;odata=verbose",
+      ...extra
+    },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error("SP POST failed: " + res.status);
+  return res.status === 204 ? {} : res.json();
+}
 </script>
 
+<div id="auth-screen" style="display:none;position:fixed;inset:0;background:var(--navy);z-index:1000;align-items:center;justify-content:center;flex-direction:column;gap:0">
+  <div style="text-align:center;max-width:420px;padding:40px 32px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);border-radius:20px">
+    <div style="width:52px;height:52px;background:var(--accent);border-radius:14px;display:flex;align-items:center;justify-content:center;margin:0 auto 20px">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+    </div>
+    <div style="font-size:22px;font-weight:600;color:white;margin-bottom:8px;letter-spacing:-0.3px">CCS Training</div>
+    <div style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:8px">Course Registration Portal</div>
+    <div style="width:40px;height:2px;background:var(--accent);margin:0 auto 24px"></div>
+    <div style="font-size:13px;color:rgba(255,255,255,0.45);line-height:1.65;margin-bottom:28px">Sign in with your Orascom Microsoft 365 account to access and register for training rounds.</div>
+    <button onclick="signIn()" style="width:100%;padding:13px 24px;background:var(--accent);border:none;border-radius:10px;color:white;font-size:15px;font-weight:600;cursor:pointer;font-family:var(--font);display:flex;align-items:center;justify-content:center;gap:10px;transition:opacity 0.15s" onmouseover="this.style.opacity=0.88" onmouseout="this.style.opacity=1">
+      <svg width="18" height="18" viewBox="0 0 23 23" fill="none"><rect x="1" y="1" width="10" height="10" fill="#F25022"/><rect x="12" y="1" width="10" height="10" fill="#7FBA00"/><rect x="1" y="12" width="10" height="10" fill="#00A4EF"/><rect x="12" y="12" width="10" height="10" fill="#FFB900"/></svg>
+      Sign in with Microsoft
+    </button>
+    <div style="font-size:11px;color:rgba(255,255,255,0.25);margin-top:16px">Use your @orascom.com account only</div>
+  </div>
+</div>
+
+<div id="app-screen" style="display:none;width:100%;height:100%">
 <div class="shell">
 
   <!-- ── Left panel ─────────────────────────────────────── -->
@@ -364,6 +501,15 @@ const CONFIG = {
 
     <div class="left-footer">
       <p><strong>First come, first served.</strong> Rounds marked Full are no longer accepting registrations. Do not submit twice for the same round.</p>
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08)">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <div>
+            <div id="user-name"  style="font-size:12px;font-weight:500;color:rgba(255,255,255,0.7)"></div>
+            <div id="user-email" style="font-size:11px;color:rgba(255,255,255,0.35);margin-top:1px"></div>
+          </div>
+          <button onclick="signOut()" style="padding:5px 12px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:rgba(255,255,255,0.45);font-size:11px;font-weight:500;cursor:pointer;font-family:var(--font);white-space:nowrap;transition:all 0.15s" onmouseover="this.style.background='rgba(255,255,255,0.12)'" onmouseout="this.style.background='rgba(255,255,255,0.07)'">Sign out</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -477,17 +623,15 @@ const CONFIG = {
 <script>
 let rounds=[], sel=null, filt="All";
 
-// ── SharePoint fetch ──────────────────────────────────────────
+// ── SharePoint fetch with Bearer token ───────────────────────
 async function fetchRounds(){
   try{
     const url=`${CONFIG.SITE_URL}/_api/web/lists/getbytitle('${CONFIG.SEATS_LIST}')/items?$select=ID,CourseName,RoundNumber,RoundDate,RoundTime,TotalSeats,SeatsRegistered,IsOpen,CourseRoundLabel,SuperUserName,SuperUserEmail&$orderby=RoundDate asc&$top=100`;
-    const r=await fetch(url,{headers:{"Accept":"application/json;odata=verbose"},credentials:"include"});
-    if(!r.ok) throw new Error(r.status);
-    const d=await r.json();
-    rounds=d.d.results;
+    const data = await spGet(url);
+    rounds = data.d.results;
     renderRounds();
   }catch(e){
-    console.warn("SP fetch failed, using demo data",e);
+    console.warn("Live fetch failed, using demo data",e);
     loadDemo();
   }
 }
@@ -651,14 +795,58 @@ async function submit(){
     roundTime:sel.RoundTime,submittedAt:new Date().toISOString()
   };
   try{
-    if(CONFIG.FLOW_URL!=="YOUR_POWER_AUTOMATE_HTTP_TRIGGER_URL"){
-      const r=await fetch(CONFIG.FLOW_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
-      if(!r.ok)throw new Error(r.status);
-    }else{
-      await new Promise(r=>setTimeout(r,1200));
+    // Step 1 — Re-check latest seat count (race condition protection)
+    const checkData = await spGet(
+      `${CONFIG.SITE_URL}/_api/web/lists/getbytitle('${CONFIG.SEATS_LIST}')/items(${sel.ID})?$select=ID,SeatsRegistered,TotalSeats,IsOpen`
+    );
+    const latestSeats = checkData.d.SeatsRegistered;
+    const totalSeats  = checkData.d.TotalSeats;
+    const isOpen      = checkData.d.IsOpen;
+
+    // Step 2 — Reject if now full
+    if(!isOpen || latestSeats >= totalSeats){
+      alert_("a3","This round just became full. Please go back and select another round.","e");
+      btn.disabled=false; btn.innerHTML="Submit registration";
+      sel.SeatsRegistered=latestSeats; sel.IsOpen=false;
+      renderRounds(); return;
     }
-    sel.SeatsRegistered=Math.min(sel.SeatsRegistered+1,sel.TotalSeats);
-    if(sel.SeatsRegistered>=sel.TotalSeats)sel.IsOpen=false;
+
+    // Step 3 — Update SeatsRegistered + 1 using Bearer token
+    const newCount = latestSeats + 1;
+    const updateBody = {
+      "__metadata":{"type":"SP.Data.CourseRoundSeatsListItem"},
+      "SeatsRegistered": newCount
+    };
+    if(newCount >= totalSeats) updateBody["IsOpen"] = false;
+
+    await spPost(
+      `${CONFIG.SITE_URL}/_api/web/lists/getbytitle('${CONFIG.SEATS_LIST}')/items(${sel.ID})`,
+      updateBody, "POST",
+      { "IF-MATCH":"*", "X-HTTP-Method":"MERGE" }
+    );
+
+    // Step 4 — Trigger Power Automate flow (emails + Teams meeting)
+    // Token passed in Authorization header for same-tenant auth
+    try{
+      const token = await getToken();
+      await fetch(CONFIG.FLOW_URL,{
+        method:"POST",
+        headers:{
+          "Content-Type":"application/json",
+          "Authorization":`Bearer ${token}`
+        },
+        body:JSON.stringify(payload)
+      });
+    }catch(flowErr){
+      // Non-blocking — seat is reserved, emails may be slightly delayed
+      console.warn("Flow trigger warning:",flowErr);
+    }
+
+    // Step 5 — Update local state and show confirmation
+    sel.SeatsRegistered = newCount;
+    if(newCount >= totalSeats) sel.IsOpen = false;
+
+    // Step 6 — Show confirmation screen
     const p=sel.CourseRoundLabel.split("|").map(s=>s.trim());
     document.getElementById("s-sub").innerHTML=`Your seat is reserved. A confirmation email with your Microsoft Teams meeting link has been sent to <strong>${payload.email}</strong>.`;
     document.getElementById("s-detail").innerHTML=`
@@ -669,7 +857,9 @@ async function submit(){
       <div class="conf-row"><span>Time</span><span>${sel.RoundTime}</span></div>
       <div class="conf-row"><span>Teams link</span><span style="color:var(--blue)">Sent to your email</span></div>`;
     goTo(4);
+
   }catch(e){
+    console.error("Submission error:",e);
     alert_("a3","Submission failed. Please try again or contact the Training Administration Team.");
     btn.disabled=false;btn.innerHTML="Submit registration";
   }
@@ -685,7 +875,7 @@ function reset(){
   goTo(1);
 }
 
-goTo(1);
+initAuth();
 </script>
 </body>
 </html>
