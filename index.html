@@ -336,7 +336,13 @@ async function initAuth() {
   try {
     const resp = await msalInstance.handleRedirectPromise();
     if (resp) currentAccount = resp.account;
-  } catch(e) { console.error("Redirect error:", e); }
+  } catch(e) {
+    console.error("Redirect error:", e);
+    // Clear any stale state and show login
+    sessionStorage.clear();
+    showLoginScreen();
+    return;
+  }
 
   // Check if already signed in
   const accounts = msalInstance.getAllAccounts();
@@ -379,11 +385,7 @@ function onSignedIn() {
 async function signIn() {
   try {
     await msalInstance.loginRedirect({
-      scopes: [
-        CONFIG.SP_SCOPE,
-        CONFIG.FLOW_SCOPE,
-        "User.Read"
-      ]
+      scopes: ["https://orascomconstructionegypt.sharepoint.com/.default"]
     });
   } catch(e) { console.error("Login error:", e); }
 }
@@ -395,13 +397,13 @@ async function signOut() {
 async function getToken() {
   try {
     const resp = await msalInstance.acquireTokenSilent({
-      scopes:  [CONFIG.SP_SCOPE],
+      scopes:  ["https://orascomconstructionegypt.sharepoint.com/.default"],
       account: currentAccount,
     });
     return resp.accessToken;
   } catch(e) {
     await msalInstance.acquireTokenRedirect({
-      scopes:  [CONFIG.SP_SCOPE],
+      scopes:  ["https://orascomconstructionegypt.sharepoint.com/.default"],
       account: currentAccount,
     });
   }
@@ -410,15 +412,21 @@ async function getToken() {
 async function getFlowToken() {
   try {
     const resp = await msalInstance.acquireTokenSilent({
-      scopes:  [CONFIG.FLOW_SCOPE],
+      scopes:  ["https://service.flow.microsoft.com/.default"],
       account: currentAccount,
     });
     return resp.accessToken;
   } catch(e) {
-    await msalInstance.acquireTokenRedirect({
-      scopes:  [CONFIG.FLOW_SCOPE],
-      account: currentAccount,
-    });
+    try {
+      const resp2 = await msalInstance.acquireTokenPopup({
+        scopes:  ["https://service.flow.microsoft.com/.default"],
+        account: currentAccount,
+      });
+      return resp2.accessToken;
+    } catch(e2) {
+      console.warn("Flow token failed, skipping flow trigger:", e2);
+      return null;
+    }
   }
 }
 
@@ -852,19 +860,19 @@ async function submit(){
     );
 
     // Step 4 — Trigger Power Automate flow (emails + Teams meeting)
-    // Uses separate Flow token scope for Power Automate authentication
     try{
       const flowToken = await getFlowToken();
-      await fetch(CONFIG.FLOW_URL,{
-        method:"POST",
-        headers:{
-          "Content-Type":"application/json",
-          "Authorization":`Bearer ${flowToken}`
-        },
-        body:JSON.stringify(payload)
-      });
+      if(flowToken){
+        await fetch(CONFIG.FLOW_URL,{
+          method:"POST",
+          headers:{
+            "Content-Type":"application/json",
+            "Authorization":`Bearer ${flowToken}`
+          },
+          body:JSON.stringify(payload)
+        });
+      }
     }catch(flowErr){
-      // Non-blocking — seat is reserved, emails may be slightly delayed
       console.warn("Flow trigger warning:",flowErr);
     }
 
