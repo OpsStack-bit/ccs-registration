@@ -312,7 +312,7 @@ const CONFIG = {
   SITE_URL:   "https://orascomconstructionegypt.sharepoint.com/sites/CourseRegistrationSystem",
   SEATS_LIST: "CourseRoundSeats",
   FLOW_URL:   "https://default964b8fc4bc9d4799b80270ae47b0f0.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/e705cd6257c349079db04da6998ccb2e/triggers/manual/paths/invoke?api-version=1",
-  SP_SCOPE:   "https://orascomconstructionegypt.sharepoint.com/AllSites.Write",
+  SP_SCOPE:   "https://orascomconstructionegypt.sharepoint.com/.default",
 };
 
 // ── MSAL setup ────────────────────────────────────────────────────────────────
@@ -426,7 +426,12 @@ async function spPost(url, body, method = "POST", extra = {}) {
     },
     body: JSON.stringify(body)
   });
-  if (!res.ok) throw new Error("SP POST failed: " + res.status);
+  if (!res.ok) {
+    let errText = "";
+    try { errText = await res.text(); } catch(e){}
+    console.error("SP POST failed:", res.status, res.statusText, errText);
+    throw new Error(`SP POST failed: ${res.status} ${res.statusText} — ${errText}`);
+  }
   return res.status === 204 ? {} : res.json();
 }
 </script>
@@ -857,6 +862,8 @@ async function submit(){
       <div class="conf-row"><span>Time</span><span>${sel.RoundTime}</span></div>
       <div class="conf-row"><span>Teams link</span><span style="color:var(--blue)">Sent to your email</span></div>`;
     goTo(4);
+    // Refresh rounds data in background so seat counts are current if user registers again
+    fetchRounds().catch(()=>{});
 
   }catch(e){
     console.error("Submission error:",e);
@@ -868,10 +875,14 @@ async function submit(){
 function reset(){
   sel=null;filt="All";
   ["f-name","f-email","f-empid","f-dept"].forEach(id=>{
-    document.getElementById(id).value="";
-    document.getElementById(id).classList.remove("err");
+    const el=document.getElementById(id);
+    if(id==="f-name"&&currentAccount?.name) el.value=currentAccount.name;
+    else if(id==="f-email"&&currentAccount?.username) el.value=currentAccount.username;
+    else el.value="";
+    el.classList.remove("err");
   });
   document.getElementById("terms").checked=false;
+  fetchRounds();
   goTo(1);
 }
 
