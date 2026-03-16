@@ -650,9 +650,12 @@ let rounds=[], sel=null, filt="All";
 async function fetchRounds(){
   try{
     console.log("Fetching rounds from SharePoint via Graph...");
-    rounds = await getListItems(CONFIG.SEATS_LIST);
-    console.log("Rounds loaded:", rounds.length, "items");
-    if(rounds.length > 0) console.log("Sample round:", rounds[0]);
+    const newRounds = await getListItems(CONFIG.SEATS_LIST);
+    console.log("Rounds loaded:", newRounds.length, "items");
+    if(newRounds.length > 0) console.log("Sample round:", newRounds[0]);
+    rounds = newRounds;
+    // Preserve selection — re-find sel in new rounds array by ID
+    if(sel) sel = rounds.find(r=>String(r.ID)===String(sel.ID)) || null;
     renderRounds();
   }catch(e){
     console.warn("Live fetch failed, using demo data", e);
