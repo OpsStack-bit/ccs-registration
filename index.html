@@ -327,6 +327,27 @@ const msalConfig = {
 const msalInstance = new msal.PublicClientApplication(msalConfig);
 let currentAccount = null;
 let spSiteId = null; // cached after first fetch
+let spListIds = {}; // { displayName: listId }
+
+function normalizeSpBool(v, defaultValue = true) {
+  if (v === true || v === 1 || v === '1' || v === 'Yes' || v === 'yes' || v === 'TRUE' || v === 'true') return true;
+  if (v === false || v === 0 || v === '0' || v === 'No' || v === 'no' || v === 'FALSE' || v === 'false') return false;
+  if (v === null || v === undefined || v === '') return defaultValue;
+  // SharePoint can return booleans in unexpected shapes; be conservative
+  return defaultValue;
+}
+
+async function getListIdByName(listName) {
+  if (spListIds[listName]) return spListIds[listName];
+  const siteId = await getSiteId();
+  const safeName = (listName || '').replace(/'/g, );
+  const filter = encodeURIComponent(`displayName eq '${safeName}'`);
+  const data = await graphGet(`/sites/${siteId}/lists?$filter=${filter}&$select=id,displayName`);
+  const hit = (data.value || []).find(x => x.displayName === listName);
+  if (!hit) throw new Error(`List not found in site: ${listName}`);
+  spListIds[listName] = hit.id;
+  return hit.id;
+}
 
 async function initAuth() {
   await msalInstance.initialize();
@@ -395,7 +416,13 @@ async function getToken() {
 async function graphGet(url) {
   const token = await getToken();
   const res = await fetch("https://graph.microsoft.com/v1.0" + url, {
-    headers: { "Authorization": `Bearer ${token}`, "Accept": "application/json" }
+    cache: "no-store",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Accept": "application/json",
+      "Cache-Control": "no-cache",
+      "Pragma": "no-cache"
+    }
   });
   if (!res.ok) throw new Error("Graph GET failed: " + res.status + " " + url);
   return res.json();
@@ -427,30 +454,43 @@ async function getSiteId() {
 
 async function getListItems(listName) {
   const siteId = await getSiteId();
-  const url = `/sites/${siteId}/lists/${listName}/items?expand=fields&$top=100`;
+  const listId = await getListIdByName(listName);
+  // NOTE: Use listId (stable) instead of list display name (can change).
+  const url = `/sites/${siteId}/lists/${listId}/items?expand=fields&$top=200`;
   const data = await graphGet(url);
   // Map Graph fields to expected format and sort by date client-side
-  return data.value.map(i => {
-    const f = i.fields;
+  const mapped = (data.value || []).map(i => {
+    const f = i.fields || {};
+    const totalSeats = Number.parseInt(f.TotalSeats ?? f.totalSeats ?? 12, 10);
+    const seatsRegistered = Number.parseInt(f.SeatsRegistered ?? f.seatsRegistered ?? 0, 10);
+    const isOpen = normalizeSpBool(f.IsOpen, true);
     return {
-      ID:               i.id,
-      CourseName:       f.CourseName       || f.Title || "",
-      RoundNumber:      f.RoundNumber      || "",
-      RoundDate:        f.RoundDate        || "",
-      RoundTime:        f.RoundTime        || "",
-      TotalSeats:       parseInt(f.TotalSeats)      || 12,
-      SeatsRegistered:  parseInt(f.SeatsRegistered) || 0,
-      IsOpen:           f.IsOpen           !== false,
-      CourseRoundLabel: f.CourseRoundLabel || f.Title || "",
-      SuperUserName:    f.SuperUserName    || "",
-      SuperUserEmail:   f.SuperUserEmail   || "",
+      ID: i.id,
+      CourseName: f.CourseName || f.Title || '',
+      RoundNumber: f.RoundNumber || '',
+      RoundDate: f.RoundDate || '',
+      RoundTime: f.RoundTime || '',
+      TotalSeats: Number.isFinite(totalSeats) ? totalSeats : 12,
+      SeatsRegistered: Number.isFinite(seatsRegistered) ? seatsRegistered : 0,
+      IsOpen: isOpen,
+      CourseRoundLabel: f.CourseRoundLabel || f.Title || '',
+      SuperUserName: f.SuperUserName || '',
+      SuperUserEmail: f.SuperUserEmail || ''
     };
-  }).sort((a,b) => a.RoundDate > b.RoundDate ? 1 : -1);
+  });
+
+  mapped.sort((a, b) => {
+    const da = new Date(a.RoundDate || 0).getTime();
+    const db = new Date(b.RoundDate || 0).getTime();
+    return da - db;
+  });
+  return mapped;
 }
 
 async function updateListItem(listName, itemId, fields) {
   const siteId = await getSiteId();
-  return graphPatch(`/sites/${siteId}/lists/${listName}/items/${itemId}/fields`, fields);
+  const listId = await getListIdByName(listName);
+  return graphPatch(`/sites/${siteId}/lists/${listId}/items/${itemId}/fields`, fields);
 }
 </script>
 
@@ -585,6 +625,10 @@ async function updateListItem(listName, itemId, fields) {
         <div id="stat-row"></div>
         <div class="toolbar">
           <div class="filters" id="filters"></div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <button class="chip" type="button" onclick="fetchRounds(true)">Refresh</button>
+            <div id="sync-note" style="font-size:11px;color:var(--g3)"></div>
+          </div>
         </div>
         <div id="rounds-wrap">
           <div class="ld"><div class="ld-spin"></div><div class="ld-txt">Loading rounds from SharePoint...</div></div>
@@ -645,21 +689,45 @@ async function updateListItem(listName, itemId, fields) {
 
 <script>
 let rounds=[], sel=null, filt="All";
+let autoRefreshTimer = null;
+function startAutoRefresh(){
+  stopAutoRefresh();
+  autoRefreshTimer = setInterval(()=>{
+    const p2 = document.getElementById('p2');
+    if(p2 && p2.classList.contains('active')) fetchRounds(true);
+  }, 30000);
+}
+function stopAutoRefresh(){
+  if(autoRefreshTimer) clearInterval(autoRefreshTimer);
+  autoRefreshTimer = null;
+}
+
 
 // ── SharePoint fetch via Microsoft Graph ─────────────────────
-async function fetchRounds(){
+async function fetchRounds(force = false){
   try{
-    console.log("Fetching rounds from SharePoint via Graph...");
+    console.log('Fetching rounds from SharePoint via Graph...');
     const newRounds = await getListItems(CONFIG.SEATS_LIST);
-    console.log("Rounds loaded:", newRounds.length, "items");
-    if(newRounds.length > 0) console.log("Sample round:", newRounds[0]);
+    console.log('Rounds loaded:', newRounds.length, 'items');
     rounds = newRounds;
     // Preserve selection — re-find sel in new rounds array by ID
     if(sel) sel = rounds.find(r=>String(r.ID)===String(sel.ID)) || null;
+
+    const note = document.getElementById('sync-note');
+    if (note) note.textContent = 'Last synced: ' + new Date().toLocaleTimeString();
+
     renderRounds();
   }catch(e){
-    console.warn("Live fetch failed, using demo data", e);
-    loadDemo();
+    console.error('Live fetch failed:', e);
+    const demoMode = new URLSearchParams(window.location.search).has('demo');
+    if(demoMode){
+      console.warn('Demo mode enabled (?demo=1) — using demo data');
+      loadDemo();
+      return;
+    }
+    // Do not show demo data in production — show an actionable message
+    document.getElementById('rounds-wrap').innerHTML = '<div class="al al-e"><span>✕</span><span>Unable to load live rounds from SharePoint right now. Please refresh the page or sign out/in. If the problem persists, contact the Training Administration Team.</span></div>';
+    alert_('a2','Live SharePoint data could not be loaded. Please click Refresh, or sign out and sign in again.','e');
   }
 }
 
@@ -688,10 +756,7 @@ function loadDemo(){
 
 // ── Helpers ───────────────────────────────────────────────────
 // SharePoint returns IsOpen as boolean true/false OR string "Yes"/"No"
-const full=r=>{
-  const isOpen = r.IsOpen===true || r.IsOpen==="Yes" || r.IsOpen===1;
-  return !isOpen || r.SeatsRegistered >= r.TotalSeats;
-};
+const full = r => (!r.IsOpen) || (Number(r.SeatsRegistered) >= Number(r.TotalSeats));
 const left=r=>Math.max(0,r.TotalSeats-r.SeatsRegistered);
 const pct=r=>r.TotalSeats>0?Math.min(100,Math.round(r.SeatsRegistered/r.TotalSeats*100)):0;
 
@@ -806,6 +871,14 @@ function goTo(n){
     else{sr.classList.add("inactive");sc.textContent=i;}
   }
   document.querySelector(".right-body").scrollTop=0;
+  // Always reload live rounds when entering Step 2 (Select round)
+  if (n === 2) {
+    fetchRounds(true).catch(()=>{});
+    startAutoRefresh();
+  } else {
+    stopAutoRefresh();
+  }
+
 }
 
 function alert_(id,msg,type="e"){
@@ -821,7 +894,7 @@ function go2(){
   if(!name){document.getElementById("f-name").classList.add("err");alert_("a1","Please enter your full name.");return}
   if(!email||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){document.getElementById("f-email").classList.add("err");alert_("a1","Please enter a valid email address.");return}
   if(!dept){document.getElementById("f-dept").classList.add("err");alert_("a1","Please enter your department.");return}
-  clr("a1");goTo(2);fetchRounds();
+  clr("a1");goTo(2);
 }
 
 function go3(){
@@ -866,7 +939,7 @@ async function submit(){
     // Step 1 — Re-check latest seat count via Graph
     const siteId = await getSiteId();
     const checkData = await graphGet(
-      `/sites/${siteId}/lists/${CONFIG.SEATS_LIST}/items/${sel.ID}?expand=fields`
+      `/sites/${siteId}/lists/${(await getListIdByName(CONFIG.SEATS_LIST))}/items/${sel.ID}?expand=fields`
     );
     const f = checkData.fields || checkData;
     const latestSeats = parseInt(f.SeatsRegistered) || 0;
@@ -891,7 +964,8 @@ async function submit(){
     // Step 4 — Write to CourseRegistrations → triggers Flow C automatically
     try{
       const token2 = await getToken();
-      await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/lists/CourseRegistrations/items`, {
+      const regListId = await getListIdByName("CourseRegistrations");
+ await fetch(`https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${regListId}/items`, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${token2}`,
